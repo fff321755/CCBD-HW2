@@ -1,0 +1,246 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: CloudFormation for CMOS 6998 008 CCBD assignment 2
+
+# For code pipline, not require in this assigment
+# Parameters: 
+  # GitHubRepoFrontend:
+  #   Type: String
+
+  # GitHubBranchFrontend:
+  #   Type: String
+
+  # GitHubRepoLambdas:
+  #   Type: String
+  
+  # GitHubBranchLambdas:
+  #   Type: String
+
+  # GitHubToken:
+  #   Type: String
+
+  # GitHubUser:
+  #   Type: String
+
+Resources:
+# S3
+  PhotoBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      AccessControl: PublicRead
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        IgnorePublicAcls: false
+        BlockPublicPolicy: false
+        RestrictPublicBuckets: false
+
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      AccessControl: PublicRead
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: index.html
+
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders:
+              - '*'
+            AllowedMethods:
+              - GET
+              - PUT
+              - POST
+              - DELETE
+            AllowedOrigins:
+              - '*'
+
+  FrontendBucketPolicy:
+    Type: 'AWS::S3::BucketPolicy'
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Sid: PublicReadForGetBucketObjects
+            Effect: Allow
+            Principal: '*'
+            Action: 
+            - 's3:GetObject'
+            Resource: !Join 
+              - ''
+              - - 'arn:aws:s3:::'
+                - !Ref FrontendBucket
+                - /*
+      Bucket: !Ref FrontendBucket
+
+
+
+  IndexPhotosLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      # FunctionName: !sub 'indexphoto-${AWS::StackName}'
+      Code:
+        S3Bucket: cloudformation-forntend-lambdas
+        S3Key: indexphotos.zip
+      Handler: lambda_function.lambda_handler
+      Role: !GetAtt LambdasRole.Arn
+      Timeout: 30
+      MemorySize: 128
+      Runtime: python3.9
+      Environment:
+        Variables:
+          REGION: us-east-1
+      
+  SearchPhotosLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      # FunctionName: !sub 'searchphotos-${AWS::StackName}'
+      Code:
+        S3Bucket: cloudformation-forntend-lambdas
+        S3Key: searchphotos.zip
+      Handler: lambda_function.lambda_handler
+      Role: !GetAtt LambdasRole.Arn
+      Timeout: 30
+      MemorySize: 128
+      Runtime: python3.9
+      Environment:
+        Variables:
+          REGION: us-east-1
+
+  # OpenSearch Free User not allow to use AdvancedSecurityOptions in cloudformation
+  OpenSearch:
+    Type: AWS::OpenSearchService::Domain
+    Properties:
+      DomainName: cloudformationphotosearch
+      ClusterConfig:
+        InstanceType: t3.small.search
+      EBSOptions:
+        EBSEnabled: true
+        Iops: '0'
+        VolumeSize: '10'
+        VolumeType: 'gp2'
+      # AccessPolicies:
+      #   Statement:
+      #     -
+      #       Effect: 'Allow'
+      #       Principal:
+      #         AWS: '*'
+      #       Action: 'es:*'
+      #       Resource: !Sub 'arn:aws:es:us-east-1:021253950508:${!Ref projectName}/cloudformationa2/*'
+      # AdvancedSecurityOptions:
+      #   Enabled: true
+      #   MasterUserOptions:
+      #     MasterUserName: master
+      #     MasterUserPassword: Passw0rd#
+
+
+  # API gateway
+  APIGateway:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub 'photo-search-website-${AWS::StackName}'
+
+
+  SearchResource:
+    Type: 'AWS::ApiGateway::Resource'
+    Properties:
+      RestApiId: !Ref APIGateway
+      ParentId: !GetAtt APIGateway.RootResourceId
+      PathPart: 'search'
+
+  SearchMethod:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      RestApiId: !Ref APIGateway
+      ResourceId: !Ref SearchResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: GET
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${SearchPhotosLambda.Arn}/invocations
+
+  SearchMethod:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      RestApiId: !Ref APIGateway
+      ResourceId: !Ref SearchResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+
+  UploadBucketResource:
+    Type: 'AWS::ApiGateway::Resource'
+    Properties:
+      RestApiId: !Ref APIGateway
+      ParentId: !GetAtt APIGateway.RootResourceId
+      PathPart: '{bucket}'
+
+  UploadKeyResource:
+    Type: 'AWS::ApiGateway::Resource'
+    Properties:
+      RestApiId: !Ref APIGateway
+      ParentId: !Ref UploadBucketResource
+      PathPart: '{key}'
+
+  UploadMethod:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      RestApiId: !Ref APIGateway
+      ResourceId: !Ref UploadKeyResource
+      HttpMethod: PUT
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS
+        IntegrationHttpMethod: PUT
+        Credentials: !GetAtt APIGateWayS3Role.Arn
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:s3:path/{bucket}/{key}
+
+  UploadMethodCORS:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      RestApiId: !Ref APIGateway
+      ResourceId: !Ref UploadKeyResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+
+  APIGatewayDeploy:
+    Type: AWS::ApiGateway::Deployment
+    Properties:
+      RestApiId:
+        Ref: APIGateway
+      StageName: Stage
+    DependsOn: [UploadMethod, SearchMethod]
+
+
+  # Role & Permission
+  APIGateWayS3Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Sid: ""
+              Effect: Allow
+              Principal:
+                Service:
+                  - apigateway.amazonaws.com
+              Action:
+                - 'sts:AssumeRole'
+      ManagedPolicyArns: ['arn:aws:iam::aws:policy/AmazonS3FullAccess', 'arn:aws:iam::aws:policy/AWSLambda_FullAccess']
+
+
+  LambdasRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Sid: ""
+              Effect: Allow
+              Principal:
+                Service:
+                  - lambda.amazonaws.com
+              Action:
+                - 'sts:AssumeRole'
+      ManagedPolicyArns: ['arn:aws:iam::aws:policy/AmazonS3FullAccess', 'arn:aws:iam::aws:policy/AWSLambda_FullAccess', 'arn:aws:iam::aws:policy/AmazonRekognitionFullAccess', 'arn:aws:iam::aws:policy/AmazonLexFullAccess', 'arn:aws:iam::aws:policy/AmazonOpenSearchServiceFullAccess']
